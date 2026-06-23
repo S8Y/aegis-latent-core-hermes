@@ -5,13 +5,12 @@
  * Reads threat stats from /dashboard-plugins/aegis-latent/data/stats.json
  * (written to disk by the agent-side __init__.py hooks).
  *
- * Uses window.__HERMES_PLUGIN_SDK__  (or __HERMES_PLUGINS__ fallback)
+ * Uses window.__HERMES_PLUGIN_SDK__ (or __HERMES_PLUGINS__ fallback)
  * for React, hooks, components.
  * Registers via   window.__HERMES_PLUGINS__.register(name, component).
  *
  * No backend API needed — user plugins cannot mount FastAPI routers
- * (GHSA-5qr3-c538-wm9j).  The JSON file approach works because the
- * dashboard serves plugin directories as static assets.
+ * (GHSA-5qr3-c538-wm9j).  Static JSON served from dashboard/ directory.
  */
 (function boot() {
   "use strict";
@@ -31,7 +30,6 @@
   var useState    = SDK.hooks.useState;
   var useEffect   = SDK.hooks.useEffect;
   var useCallback = SDK.hooks.useCallback;
-  var useRef      = SDK.hooks.useRef;
 
   var Card        = SDK.components.Card;
   var CardHeader  = SDK.components.CardHeader;
@@ -43,7 +41,7 @@
 
   /* ── Config ───────────────────────────────────────────────────────── */
   var DATA_FILE = "/dashboard-plugins/aegis-latent/data/stats.json";
-  var POLL_MS   = 5000;
+  var POLL_MS   = 4000;
 
   /* ── Utilities ───────────────────────────────────────────────────── */
   function timeAgo(isoStr) {
@@ -70,15 +68,7 @@
       medium:   "var(--color-warning, #f59e0b)",
       low:      "#3b82f6",
       clean:    "var(--color-success, #22c55e)"
-    })[sev] || "var(--color-success, #22c55e)";
-  }
-
-  function throttle(fn, ms) {
-    var last = 0;
-    return function () {
-      var now = Date.now();
-      if (now - last >= ms) { last = now; return fn.apply(this, arguments); }
-    };
+    })[sev] || "var(--color-success, #22c55e";
   }
 
   function fetchJSON(url) {
@@ -170,8 +160,7 @@
         ? h("div", { className: "aegis-alert-engines" },
             a.flagged_engines.map(function (e) {
               return h("span", { key: e,
-                className: "aegis-badge aegis-badge-flag",
-                style: { fontSize: "0.6rem" }
+                className: "aegis-badge aegis-badge-flag"
               }, shorten(e, 30));
             })
           )
@@ -181,36 +170,37 @@
 
   /* ── Main tab component ──────────────────────────────────────────── */
   function AegisThreatLab() {
-    /* state */
-    var sStats   = useState(null),  stats      = sStats[0],   setStats      = sStats[1];
-    var sLoad    = useState(true),  loading    = sLoad[0],    setLoading    = sLoad[1];
-    var sError   = useState(null),  error      = sError[0],   setError      = sError[1];
-    var pollRef  = useRef(null);
+    var sStats   = useState(null),  stats      = sStats[0],  setStats      = sStats[1];
+    var sLoad    = useState(true),  loading    = sLoad[0],   setLoading    = sLoad[1];
+    var sError   = useState(null),  error      = sError[0],  setError      = sError[1];
+    var sRetry   = useState(0),     retry      = sRetry[0],  setRetry      = sRetry[1];
 
-    /* ── fetch data from static JSON file ─────────────────────────── */
     var fetchData = useCallback(function () {
       fetchJSON(DATA_FILE).then(function (data) {
-        if (data) {
+        if (data && data.scans_total !== undefined) {
           setStats(data);
           setLoading(false);
           setError(null);
         } else {
-          /* File may not exist yet if the agent has never run a scan */
-          if (!loading) return; // only show error on first load
+          /* file may not exist yet — hooks haven't fired */
+          if (!loading) return;
           setLoading(false);
-          setError("No data yet — the agent has not scanned any messages. Run a conversation or use 'hermes aegis scan <text>' to generate data.");
+          setError("no-data");
         }
       });
     }, [loading]);
 
-    /* ── poll on mount ──────────────────────────────────────────── */
+    /* poll on mount */
     useEffect(function () {
       fetchData();
-      pollRef.current = setInterval(fetchData, POLL_MS);
-      return function () {
-        if (pollRef.current) clearInterval(pollRef.current);
-      };
+      var id = setInterval(fetchData, POLL_MS);
+      return function () { clearInterval(id); };
     }, [fetchData]);
+
+    /* manual retry */
+    useEffect(function () {
+      if (retry > 0) fetchData();
+    }, [retry, fetchData]);
 
     /* ── render ────────────────────────────────────────────────── */
     if (loading) {
@@ -221,17 +211,41 @@
       );
     }
 
-    if (error) {
+    if (error === "no-data") {
       return h(Card, null,
         h(CardHeader, null, h(CardTitle, null, "Aegis Threat Lab")),
         h(CardContent, null,
           h("div", { className: "aegis-empty",
-            style: { color: "var(--color-muted-foreground)" }
-          }, "\u2139 " + error),
+            style: { color: "var(--color-muted-foreground)", lineHeight: 1.6 }
+          },
+            "\u2139 No data yet. The stats file ",
+            h("code", null, "dashboard/data/stats.json"),
+            " has not been created.",
+            h("br"), h("br"),
+            "This means the agent-side plugin has not loaded yet.",
+            h("br"), h("br"),
+            "Please run:",
+            h("br"),
+            h("code", { style: { fontSize: "0.75rem" } },
+              "hermes daemon restart"
+            ),
+            h("br"),
+            "then start a new conversation and send a message.",
+            h("br"),
+            "The hooks will fire and data will appear on the next poll."
+          ),
           h("div", { style: { textAlign: "center", marginTop: "1rem" } },
-            h("span", { style: { fontSize: "0.75rem",
+            h("span", {
+              onClick: function () { setRetry(function (n) { return n + 1; }); },
+              style: { cursor: "pointer", fontSize: "0.75rem",
+                color: "var(--color-ring, #3b82f6)",
+                textDecoration: "underline" }
+            }, "Retry now")
+          ),
+          h("div", { style: { textAlign: "center", marginTop: "0.5rem" } },
+            h("span", { style: { fontSize: "0.7rem",
               color: "var(--color-muted-foreground)" }
-            }, "Auto-refreshes every 5s \u2014 data appears once the hook fires.")
+            }, "Auto-refreshes every 4s")
           )
         )
       );
@@ -254,7 +268,6 @@
 
     return h("div", null,
 
-      /* header bar */
       h("div", { className: "aegis-header-bar" },
         h("div", { className: "aegis-header-left" },
           h("h3", { className: "aegis-header-title" }, "Aegis Threat Lab"),
@@ -268,15 +281,13 @@
         )
       ),
 
-      /* info banner */
       h("div", { className: "aegis-banner" },
         "Threats are detected automatically during agent conversations. ",
-        "To scan specific text, use ",
+        "Use ",
         h("code", null, "hermes aegis scan <text>"),
-        " in the CLI."
+        " for on-demand scanning."
       ),
 
-      /* stat cards */
       h("div", { className: "aegis-grid" },
         h(StatCard, { value: s.scans_total || 0,   label: "Total scans" }),
         h(StatCard, { value: s.scans_clean || 0,   label: "Clean",    success: true }),
@@ -288,24 +299,16 @@
         })
       ),
 
-      /* severity distribution */
       h(Card, null, h(CardContent, null,
-        h("div", { className: "aegis-section-title" },
-          "Severity Distribution"
-        ),
+        h("div", { className: "aegis-section-title" }, "Severity Distribution"),
         h(SeverityBars, { counts: sevCounts })
       )),
 
-      /* engines + categories side-by-side */
       h("div", { className: "aegis-row" },
         h(Card, null, h(CardContent, null,
-          h("div", { className: "aegis-section-title" },
-            "Engine Hit Rates"
-          ),
+          h("div", { className: "aegis-section-title" }, "Engine Hit Rates"),
           Object.keys(engineHits).length === 0
-            ? h("div", { className: "aegis-empty" },
-                "No flagged engines yet"
-              )
+            ? h("div", { className: "aegis-empty" }, "No flagged engines yet")
             : h("table", { className: "aegis-engine-table" },
                 h("thead", null, h("tr", null,
                   h("th", null, "Engine"),
@@ -314,9 +317,7 @@
                 )),
                 h("tbody", null,
                   Object.keys(engineHits)
-                    .sort(function (a, b) {
-                      return engineHits[b] - engineHits[a];
-                    })
+                    .sort(function (a, b) { return engineHits[b] - engineHits[a]; })
                     .slice(0, 12)
                     .map(function (name) {
                       return h(EngineRow, {
@@ -328,13 +329,9 @@
               )
         )),
         h(Card, null, h(CardContent, null,
-          h("div", { className: "aegis-section-title" },
-            "Threat Categories"
-          ),
+          h("div", { className: "aegis-section-title" }, "Threat Categories"),
           Object.keys(catHits).length === 0
-            ? h("div", { className: "aegis-empty" },
-                "No threats detected yet"
-              )
+            ? h("div", { className: "aegis-empty" }, "No threats detected yet")
             : h("table", { className: "aegis-engine-table" },
                 h("thead", null, h("tr", null,
                   h("th", null, "Category"),
@@ -343,9 +340,7 @@
                 )),
                 h("tbody", null,
                   Object.keys(catHits)
-                    .sort(function (a, b) {
-                      return catHits[b] - catHits[a];
-                    })
+                    .sort(function (a, b) { return catHits[b] - catHits[a]; })
                     .map(function (name) {
                       return h(EngineRow, {
                         key: name, name: name,
@@ -357,11 +352,8 @@
         ))
       ),
 
-      /* recent alerts */
       h(Card, null,
-        h(CardHeader, null, h(CardTitle, {
-          style: { margin: 0, fontSize: "1rem" }
-        },
+        h(CardHeader, null, h(CardTitle, { style: { margin: 0, fontSize: "1rem" } },
           "Recent Alerts ",
           h("span", { className: "aegis-alert-count" },
             "(" + (alerts.length || 0) + ")"
@@ -369,9 +361,7 @@
         )),
         h(CardContent, null,
           alerts.length === 0
-            ? h("div", { className: "aegis-empty" },
-                "No alerts \u2014 all clear."
-              )
+            ? h("div", { className: "aegis-empty" }, "No alerts \u2014 all clear.")
             : h("div", { className: "aegis-alerts" },
                 alerts.slice(0, 30).map(function (a, i) {
                   return h(AlertItem, {

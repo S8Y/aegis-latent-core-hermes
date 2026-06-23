@@ -16,18 +16,24 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .engine.detectors import scan_text, sanity_check
+# Ensure plugin root is on sys.path so absolute imports of engine/ work
+_PLUGIN_DIR = Path(__file__).resolve().parent
+if str(_PLUGIN_DIR) not in sys.path:
+    sys.path.insert(0, str(_PLUGIN_DIR))
+
+from engine.detectors import scan_text, sanity_check
 
 # ── Plugin metadata ─────────────────────────────────────────────────────────────
 
 PLUGIN_VERSION = "2.4.0"
-PLUGIN_DIR = Path(__file__).resolve().parent
+PLUGIN_DIR = _PLUGIN_DIR
 DATA_DIR = PLUGIN_DIR / "dashboard" / "data"
 
 # ── In-memory threat store ──────────────────────────────────────────────────────
@@ -358,5 +364,6 @@ def register(ctx: Any) -> None:
     # ── Try once at startup to persist (proves DATA_DIR is writable) ──
     try:
         _persist_store()
-    except Exception:
-        pass
+        print("[aegis] plugin loaded — wrote initial stats.json to", DATA_DIR)
+    except Exception as exc:
+        print("[aegis] WARNING: could not write initial stats.json:", exc)
