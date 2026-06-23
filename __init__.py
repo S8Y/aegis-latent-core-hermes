@@ -164,13 +164,14 @@ def _merge_store(persisted: dict[str, Any]) -> None:
 # ── Hook callbacks ──────────────────────────────────────────────────────────────
 
 
-def on_pre_tool_call(tool_name: str, params: dict[str, Any], **kwargs: Any) -> None:
+def on_pre_tool_call(tool_name: str, args: dict[str, Any], **kwargs: Any) -> None:
     """Hook fired before every tool call — scans ALL input for threats."""
+    # Diagnostic — visible in `hermes logs | grep '\[aegis\]'
     sys.stderr.write(f"[aegis] pre_tool_call(tool={tool_name})\n")
-    # Flatten all params into a single text block for scanning
+    # Flatten all args into a single text block for scanning
     texts: list[str] = []
-    if isinstance(params, dict):
-        for val in params.values():
+    if isinstance(args, dict):
+        for val in args.values():
             if isinstance(val, str) and len(val) > 3:
                 texts.append(val)
             elif isinstance(val, dict):
@@ -192,7 +193,7 @@ def on_pre_tool_call(tool_name: str, params: dict[str, Any], **kwargs: Any) -> N
 
 
 def on_post_tool_call(
-    tool_name: str, params: dict[str, Any], result: Any, **kwargs: Any
+    tool_name: str, args: dict[str, Any], result: Any, **kwargs: Any
 ) -> None:
     """Hook fired after every tool call — scans ALL output for threats."""
     texts: list[str] = []
