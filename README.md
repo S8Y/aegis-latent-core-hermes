@@ -6,6 +6,9 @@ adversarial patterns — then visualises everything in a Threat Lab dashboard ta
 
 **Zero configuration.** No API keys, no environment variables, no proxy setup.
 Plug and play.
+ 
+<img width="2550" height="927" alt="{FAFB2CED-E47A-4378-AE2D-8B0D1D3F4776}" src="https://github.com/user-attachments/assets/6555349a-41f2-43e8-97ea-430a1a949f14" />
+ 
 
 ---
 
