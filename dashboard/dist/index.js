@@ -1,384 +1,288 @@
-/**
- * aegis-latent — Hermes Dashboard Threat Lab Tab
- *
- * Single IIFE bundle — no build step.
- * Reads threat stats from /dashboard-plugins/aegis-latent/data/stats.json
- * (written to disk by the agent-side __init__.py hooks).
- *
- * Uses window.__HERMES_PLUGIN_SDK__ (or __HERMES_PLUGINS__ fallback)
- * for React, hooks, components.
- * Registers via   window.__HERMES_PLUGINS__.register(name, component).
- *
- * No backend API needed — user plugins cannot mount FastAPI routers
- * (GHSA-5qr3-c538-wm9j).  Static JSON served from dashboard/ directory.
+/* Aegis Threat Lab — Hermes Memory UI dashboard plugin.
+ * Uses Hermes Plugin SDK (window.__HERMES_PLUGIN_SDK__).
+ * No build step — plain IIFE, loads dashboard/data/stats.json every 4s.
  */
-(function boot() {
+
+(function () {
   "use strict";
 
-  /* ── Resolve SDK ──────────────────────────────────────────────────── */
-  var SDK = window.__HERMES_PLUGIN_SDK__ || window.__HERMES_PLUGINS__;
-  var REG = window.__HERMES_PLUGINS__    || window.__HERMES_PLUGIN_SDK__;
-
-  if (!SDK || !SDK.React || typeof SDK.React.createElement !== "function") {
-    setTimeout(boot, 50);
-    return;
-  }
-
-  /* ── SDK imports ─────────────────────────────────────────────────── */
-  var React       = SDK.React;
-  var h           = React.createElement;
-  var useState    = SDK.hooks.useState;
-  var useEffect   = SDK.hooks.useEffect;
+  /* ── SDK setup ────────────────────────────────────────────────────── */
+  var SDK = window.__HERMES_PLUGIN_SDK__;
+  var React = SDK.React;
+  var h = React.createElement;
+  var useState = SDK.hooks.useState;
+  var useEffect = SDK.hooks.useEffect;
   var useCallback = SDK.hooks.useCallback;
-
-  var Card        = SDK.components.Card;
-  var CardHeader  = SDK.components.CardHeader;
-  var CardTitle   = SDK.components.CardTitle;
+  var Card = SDK.components.Card;
+  var CardHeader = SDK.components.CardHeader;
+  var CardTitle = SDK.components.CardTitle;
   var CardContent = SDK.components.CardContent;
-  var Badge       = SDK.components.Badge;
+  var Badge = SDK.components.Badge;
+  var cn = SDK.utils.cn;
 
-  var cn = (SDK.utils && SDK.utils.cn) || function (c) { return c; };
+  /* ── Derive plugin data directory from this script's URL ─────────── */
+  var thisScript = document.currentScript;
+  var pluginBase = thisScript ? thisScript.src.replace(/\/dist\/index\.js$/, "") : "";
+  var DATA_FILE = pluginBase + "/data/stats.json";
+  var POLL_MS = 4000;
 
-  /* ── Config ───────────────────────────────────────────────────────── */
-  var DATA_FILE = "/dashboard-plugins/aegis-latent/data/stats.json";
-  var POLL_MS   = 4000;
-
-  /* ── Utilities ───────────────────────────────────────────────────── */
-  function timeAgo(isoStr) {
-    if (!isoStr) return "";
-    var diff = Date.now() - new Date(isoStr).getTime();
-    if (isNaN(diff)) return "";
-    var s = Math.floor(diff / 1000);
-    if (s < 5)   return "just now";
-    if (s < 60)  return s + "s ago";
-    var m = Math.floor(s / 60);
-    if (m < 60)  return m + "m ago";
-    return Math.floor(m / 60) + "h ago";
-  }
+  /* ── helpers ──────────────────────────────────────────────────────── */
 
   function shorten(t, n) {
     if (!t) return "";
     return t.length <= n ? t : t.slice(0, n) + "\u2026";
   }
 
-  function sevColor(sev) {
-    return ({
-      critical: "var(--color-destructive, #ef4444)",
-      high:     "#f97316",
-      medium:   "var(--color-warning, #f59e0b)",
-      low:      "#3b82f6",
-      clean:    "var(--color-success, #22c55e)"
-    })[sev] || "var(--color-success, #22c55e";
-  }
+  /* ── severity colors ──────────────────────────────────────────────── */
 
-  function fetchJSON(url) {
-    return fetch(url).then(function (r) {
-      if (!r.ok) return null;
-      return r.json().catch(function () { return null; });
-    });
-  }
+  var SEV_MAP = { critical: "destructive", high: "warning", medium: "default", low: "secondary" };
 
-  /* ── Sub-components ──────────────────────────────────────────────── */
-
-  function StatCard(props) {
-    return h(Card, {
-      className: "aegis-stat-card" +
-        (props.danger  ? " aegis-danger" : "") +
-        (props.warning ? " aegis-warning" : "") +
-        (props.success ? " aegis-success" : "")
-      },
-      h("div", { className: "aegis-stat-value" },
-        typeof props.value === "number"
-          ? props.value.toLocaleString()
-          : props.value
-      ),
-      h("div", { className: "aegis-stat-label" }, props.label)
-    );
-  }
-
-  function SeverityBars(props) {
-    var names  = ["critical", "high", "medium", "low", "clean"];
-    var counts = props.counts || {};
-    var maxVal = 1;
-    names.forEach(function (s) { if ((counts[s] || 0) > maxVal) maxVal = counts[s]; });
-
-    return h("div", { className: "aegis-bars" },
-      names.map(function (sev) {
-        var c   = counts[sev] || 0;
-        var pct = maxVal > 0 ? (c / maxVal) * 100 : 0;
-        return h("div", { key: sev,
-          className: cn("aegis-bar", "aegis-bar-" + sev),
-          style: { height: Math.max(pct, 4) + "%" },
-          title: sev + ": " + c
-        },
-          h("span", { className: "aegis-bar-count" },
-            c > 0 ? c.toLocaleString() : ""
-          ),
-          h("span", { className: "aegis-bar-label" },
-            sev === "critical" ? "crit" : sev
-          )
-        );
-      })
-    );
-  }
-
-  function EngineRow(props) {
-    var pct = Math.min((props.count / (props.maxVal || 1)) * 100, 100);
-    return h("tr", null,
-      h("td", { className: "aegis-cell-name" }, props.name),
-      h("td", { className: "aegis-cell-count" }, props.count.toLocaleString()),
-      h("td", null,
-        h("div", { className: "aegis-engine-bar-bg" },
-          h("div", {
-            className: "aegis-engine-bar-fill",
-            style: { width: pct + "%", background: "var(--color-ring, #3b82f6)" }
-          })
-        )
-      )
-    );
-  }
+  /* ── Sub-components ─────────────────────────────────────────────────── */
 
   function AlertItem(props) {
-    var a   = props.alert;
-    var cls = "aegis-alert-item";
-    if (a.severity === "critical") cls += " aegis-alert-critical";
-    else if (a.severity === "high") cls += " aegis-alert-high";
+    var a = props.alert;
+    var sev = (a.severity || "info").toLowerCase();
+    var variant = SEV_MAP[sev] || "outline";
+    var engines = a.flagged_engines;
+    if (!engines || !engines.length) engines = [];
 
-    return h("div", { className: cls },
-      h("div", { className: "aegis-alert-meta" },
-        h("span", {
-          className: "aegis-alert-severity aegis-alert-severity-" + a.severity,
-          style: { color: sevColor(a.severity) }
-        }, a.severity),
-        h("span", { className: "aegis-alert-time" }, timeAgo(a.timestamp)),
-        h(Badge, {
-          variant: a.verdict === "block" ? "destructive" : "secondary"
-        }, a.verdict)
+    return h("div", { className: cn("border border-border rounded p-3", "aegis-alert-item") },
+      h("div", { className: cn("flex items-center gap-2 mb-1 text-xs") },
+        h(Badge, { variant: variant }, sev),
+        h("span", { className: "text-muted-foreground" }, a.time_ago || a.timestamp || ""),
+        h("span", { className: "font-mono" }, a.verdict || "flag"),
+        a.tool
+          ? h(Badge, { variant: "outline", className: "ml-auto" }, a.tool)
+          : null
       ),
-      h("div", { className: "aegis-alert-text" }, shorten(a.text_snippet, 120)),
-      a.flagged_engines && a.flagged_engines.length
-        ? h("div", { className: "aegis-alert-engines" },
-            a.flagged_engines.map(function (e) {
-              return h("span", { key: e,
-                className: "aegis-badge aegis-badge-flag"
-              }, shorten(e, 30));
+      h("div", { className: cn("text-sm break-words leading-relaxed", "aegis-alert-text") },
+        shorten(a.text_snippet || a.content || "", 400)
+      ),
+      engines.length
+        ? h("div", { className: cn("flex flex-wrap gap-1 mt-1") },
+            engines.map(function (e, i) {
+              return h(Badge, { key: i, variant: "outline", className: "text-[10px]" }, e);
             })
           )
         : null
     );
   }
 
-  /* ── Main tab component ──────────────────────────────────────────── */
+  /* ── Parse raw JSON into flat display object ────────────────────────── */
+  /* Python writes root-level keys:
+   *   scans_total, scans_clean, scans_flagged, scans_blocked,
+   *   total_duration_ms, severity_counts, engine_hit_counts,
+   *   category_counts, alerts
+   */
+
+  function parseStore(raw) {
+    if (!raw || typeof raw !== "object") return null;
+    return {
+      scans_total: raw.scans_total || 0,
+      scans_clean: raw.scans_clean || 0,
+      scans_flagged: raw.scans_flagged || 0,
+      scans_blocked: raw.scans_blocked || 0,
+      avg_duration_ms: raw.scans_total > 0
+        ? ((raw.total_duration_ms || 0) / raw.scans_total).toFixed(1)
+        : "0.0",
+      severity_counts: raw.severity_counts || {},
+      engine_hit_counts: raw.engine_hit_counts || {},
+      category_counts: raw.category_counts || {},
+      alerts: raw.alerts || [],
+      version: raw.version || "",
+      last_scan_at: raw.last_scan_at || null
+    };
+  }
+
+  /* ── Main tab component ──────────────────────────────────────────────── */
+
   function AegisThreatLab() {
-    var sStats   = useState(null),  stats      = sStats[0],  setStats      = sStats[1];
-    var sLoad    = useState(true),  loading    = sLoad[0],   setLoading    = sLoad[1];
-    var sError   = useState(null),  error      = sError[0],  setError      = sError[1];
-    var sRetry   = useState(0),     retry      = sRetry[0],  setRetry      = sRetry[1];
+    var state = useState({
+      store: null,
+      loading: true,
+      fetchError: null
+    });
+    var data = state[0];
+    var setData = state[1];
+    var stats = data.store;
 
-    var fetchData = useCallback(function () {
-      fetchJSON(DATA_FILE).then(function (data) {
-        if (data && data.scans_total !== undefined) {
-          setStats(data);
-          setLoading(false);
-          setError(null);
-        } else {
-          /* file may not exist yet — hooks haven't fired */
-          if (!loading) return;
-          setLoading(false);
-          setError("no-data");
+    var poll = useCallback(function () {
+      SDK.fetchJSON(DATA_FILE).then(function (d) {
+        var parsed = parseStore(d);
+        if (!parsed) {
+          setData({ store: null, loading: false, fetchError: "Empty or invalid JSON" });
+          return;
         }
+        setData({ store: parsed, loading: false, fetchError: null });
+      }).catch(function (err) {
+        setData(function (prev) {
+          return {
+            store: prev.store,
+            loading: false,
+            fetchError: err ? String(err) : "Fetch failed"
+          };
+        });
       });
-    }, [loading]);
+    }, []);
 
-    /* poll on mount */
     useEffect(function () {
-      fetchData();
-      var id = setInterval(fetchData, POLL_MS);
+      poll();
+      var id = setInterval(poll, POLL_MS);
       return function () { clearInterval(id); };
-    }, [fetchData]);
+    }, [poll]);
 
-    /* manual retry */
-    useEffect(function () {
-      if (retry > 0) fetchData();
-    }, [retry, fetchData]);
-
-    /* ── render ────────────────────────────────────────────────── */
-    if (loading) {
+    if (data.loading) {
       return h(Card, null,
-        h(CardContent, { className: "aegis-empty" },
-          "Loading Aegis Threat Lab\u2026"
+        h(CardContent, { className: "flex items-center justify-center py-12" },
+          h("span", { className: "text-muted-foreground text-sm" }, "Loading\u2026")
         )
       );
     }
 
-    if (error === "no-data") {
+    if (data.fetchError) {
       return h(Card, null,
-        h(CardHeader, null, h(CardTitle, null, "Aegis Threat Lab")),
-        h(CardContent, null,
-          h("div", { className: "aegis-empty",
-            style: { color: "var(--color-muted-foreground)", lineHeight: 1.6 }
-          },
-            "\u2139 No data yet. The stats file ",
-            h("code", null, "dashboard/data/stats.json"),
-            " has not been created.",
-            h("br"), h("br"),
-            "This means the agent-side plugin has not loaded yet.",
-            h("br"), h("br"),
-            "Please run:",
-            h("br"),
-            h("code", { style: { fontSize: "0.75rem" } },
-              "hermes daemon restart"
-            ),
-            h("br"),
-            "then start a new conversation and send a message.",
-            h("br"),
-            "The hooks will fire and data will appear on the next poll."
-          ),
-          h("div", { style: { textAlign: "center", marginTop: "1rem" } },
-            h("span", {
-              onClick: function () { setRetry(function (n) { return n + 1; }); },
-              style: { cursor: "pointer", fontSize: "0.75rem",
-                color: "var(--color-ring, #3b82f6)",
-                textDecoration: "underline" }
-            }, "Retry now")
-          ),
-          h("div", { style: { textAlign: "center", marginTop: "0.5rem" } },
-            h("span", { style: { fontSize: "0.7rem",
-              color: "var(--color-muted-foreground)" }
-            }, "Auto-refreshes every 4s")
+        h(CardContent, { className: "flex items-center justify-center py-12" },
+          h("div", { className: "flex flex-col items-center gap-2" },
+            h("span", { className: "text-muted-foreground text-sm" }, data.fetchError),
+            h("code", { className: "text-xs text-muted-foreground bg-muted px-2 py-1 rounded" }, DATA_FILE)
           )
         )
       );
     }
 
-    var s = stats || {};
-    var sevCounts  = s.severity_counts || {};
-    var engineHits = s.engine_hit_counts || {};
-    var catHits    = s.category_counts  || {};
-    var alerts     = s.alerts || [];
+    if (!stats) {
+      return h(Card, null,
+        h(CardContent, { className: "flex items-center justify-center py-12" },
+          h("span", { className: "text-muted-foreground text-sm" }, "No data yet\u2026")
+        )
+      );
+    }
 
-    var eMax = 1;
-    Object.keys(engineHits).forEach(function (k) {
-      if (engineHits[k] > eMax) eMax = engineHits[k];
-    });
-    var cMax = 1;
-    Object.keys(catHits).forEach(function (k) {
-      if (catHits[k] > cMax) cMax = catHits[k];
-    });
+    var running = stats.scans_total > 0;
+    var sevOrder = ["critical", "high", "medium", "low"];
+    var sevCounts = stats.severity_counts;
+    var engineEntries = Object.keys(stats.engine_hit_counts).sort(function (a, b) { return stats.engine_hit_counts[b] - stats.engine_hit_counts[a]; });
+    var catEntries = Object.keys(stats.category_counts).sort(function (a, b) { return stats.category_counts[b] - stats.category_counts[a]; });
+    var alerts = stats.alerts || [];
 
-    return h("div", null,
+    return h("div", { className: cn("flex flex-col gap-6", "aegis-tab") },
 
-      h("div", { className: "aegis-header-bar" },
-        h("div", { className: "aegis-header-left" },
-          h("h3", { className: "aegis-header-title" }, "Aegis Threat Lab"),
-          h("span", { className: "aegis-version" },
-            "v" + (s.version || "\u2014")
+      /* ── Header ───────────────────────────────────────────────────── */
+      h(Card, null,
+        h(CardHeader, { className: "flex flex-row items-center justify-between" },
+          h("div", { className: "flex items-center gap-3" },
+            h(CardTitle, { className: "text-lg" }, "Aegis Threat Lab"),
+            h(Badge, { variant: running ? "default" : "outline" }, running ? "\u25cf Live" : "\u25cb Idle")
+          ),
+          h(Badge, { variant: "outline" }, stats.version || "v2.5.3")
+        ),
+        h(CardContent, { className: "flex flex-col gap-4" },
+          h("p", { className: "text-sm text-muted-foreground" },
+            "AI governance & threat detection \u2014 scans prompts and responses for jailbreaks, prompt injection, malware, credential leaks, and adversarial patterns."
+          ),
+
+          /* ── Stat cards ───────────────────────────────────────────── */
+          h("div", { className: cn("grid grid-cols-2 md:grid-cols-5 gap-3", "aegis-cards") },
+            h("div", { className: cn("border border-border rounded p-3 text-center", "aegis-card") },
+              h("div", { className: "text-xs text-muted-foreground mb-1" }, "Total scans"),
+              h("div", { className: "text-2xl font-mono" }, stats.scans_total)
+            ),
+            h("div", { className: cn("border border-border rounded p-3 text-center", "aegis-card-clean") },
+              h("div", { className: "text-xs text-muted-foreground mb-1" }, "Clean"),
+              h("div", { className: "text-2xl font-mono text-green-500" }, stats.scans_clean)
+            ),
+            h("div", { className: cn("border border-border rounded p-3 text-center", "aegis-card-flagged") },
+              h("div", { className: "text-xs text-muted-foreground mb-1" }, "Flagged"),
+              h("div", { className: "text-2xl font-mono text-yellow-500" }, stats.scans_flagged)
+            ),
+            h("div", { className: cn("border border-border rounded p-3 text-center", "aegis-card-blocked") },
+              h("div", { className: "text-xs text-muted-foreground mb-1" }, "Blocked"),
+              h("div", { className: "text-2xl font-mono text-red-500" }, stats.scans_blocked)
+            ),
+            h("div", { className: cn("border border-border rounded p-3 text-center", "aegis-card-duration") },
+              h("div", { className: "text-xs text-muted-foreground mb-1" }, "Avg duration"),
+              h("div", { className: "text-xl font-mono" }, stats.avg_duration_ms + "ms")
+            )
+          )
+        )
+      ),
+
+      /* ── Severity bars ────────────────────────────────────────────── */
+      h(Card, null,
+        h(CardHeader, null,
+          h(CardTitle, { className: "text-base" }, "Severity Distribution")
+        ),
+        h(CardContent, null,
+          h("div", { className: "flex flex-col gap-2" },
+            sevOrder.map(function (s) {
+              var count = sevCounts[s] || 0;
+              return h("div", { key: s, className: "flex items-center gap-3 text-sm" },
+                h("span", { className: "w-16 text-right text-muted-foreground font-mono" }, s),
+                h("div", { className: "flex-1 h-3 bg-muted rounded overflow-hidden" },
+                  h("div", {
+                    className: cn("h-full rounded", "aegis-bar", "aegis-bar-" + s),
+                    style: { width: Math.min(count * 10, 100) + "%", backgroundColor: s === "critical" ? "#ef4444" : s === "high" ? "#f97316" : s === "medium" ? "#eab308" : "#3b82f6" }
+                  })
+                ),
+                h("span", { className: "w-8 text-right font-mono" }, count)
+              );
+            })
+          )
+        )
+      ),
+
+      /* ── Two-column: engine hits + categories ──────────────────────── */
+      h("div", { className: "grid grid-cols-1 md:grid-cols-2 gap-4" },
+        h(Card, null,
+          h(CardHeader, null,
+            h(CardTitle, { className: "text-base" }, "Engine Hit Rates")
+          ),
+          h(CardContent, null,
+            engineEntries.length
+              ? h("div", { className: "flex flex-col gap-1 text-sm" },
+                  engineEntries.map(function (k) {
+                    return h("div", { key: k, className: "flex justify-between items-center border-b border-border/40 py-1" },
+                      h("span", { className: "font-mono truncate" }, k),
+                      h("span", { className: "font-mono text-muted-foreground" }, stats.engine_hit_counts[k])
+                    );
+                  })
+                )
+              : h("span", { className: "text-xs text-muted-foreground" }, "No data")
           )
         ),
-        h("div", { className: "aegis-header-right" },
-          h("span", { className: "aegis-live-label" }, "live"),
-          h("span", { className: "aegis-live-dot" })
+        h(Card, null,
+          h(CardHeader, null,
+            h(CardTitle, { className: "text-base" }, "Threat Categories")
+          ),
+          h(CardContent, null,
+            catEntries.length
+              ? h("div", { className: "flex flex-col gap-1 text-sm" },
+                  catEntries.map(function (k) {
+                    return h("div", { key: k, className: "flex justify-between items-center border-b border-border/40 py-1" },
+                      h("span", { className: "font-mono truncate" }, k),
+                      h("span", { className: "font-mono text-muted-foreground" }, stats.category_counts[k])
+                    );
+                  })
+                )
+              : h("span", { className: "text-xs text-muted-foreground" }, "No data")
+          )
         )
       ),
 
-      h("div", { className: "aegis-banner" },
-        "Threats are detected automatically during agent conversations. ",
-        "Use ",
-        h("code", null, "hermes aegis scan <text>"),
-        " for on-demand scanning."
-      ),
-
-      h("div", { className: "aegis-grid" },
-        h(StatCard, { value: s.scans_total || 0,   label: "Total scans" }),
-        h(StatCard, { value: s.scans_clean || 0,   label: "Clean",    success: true }),
-        h(StatCard, { value: s.scans_flagged || 0, label: "Flagged",  warning: true }),
-        h(StatCard, { value: s.scans_blocked || 0, label: "Blocked",  danger: true }),
-        h(StatCard, {
-          value: (s.avg_duration_ms || 0).toFixed(1) + "ms",
-          label: "Avg duration"
-        })
-      ),
-
-      h(Card, null, h(CardContent, null,
-        h("div", { className: "aegis-section-title" }, "Severity Distribution"),
-        h(SeverityBars, { counts: sevCounts })
-      )),
-
-      h("div", { className: "aegis-row" },
-        h(Card, null, h(CardContent, null,
-          h("div", { className: "aegis-section-title" }, "Engine Hit Rates"),
-          Object.keys(engineHits).length === 0
-            ? h("div", { className: "aegis-empty" }, "No flagged engines yet")
-            : h("table", { className: "aegis-engine-table" },
-                h("thead", null, h("tr", null,
-                  h("th", null, "Engine"),
-                  h("th", null, "Hits"),
-                  h("th", null, "")
-                )),
-                h("tbody", null,
-                  Object.keys(engineHits)
-                    .sort(function (a, b) { return engineHits[b] - engineHits[a]; })
-                    .slice(0, 12)
-                    .map(function (name) {
-                      return h(EngineRow, {
-                        key: name, name: shorten(name, 32),
-                        count: engineHits[name], maxVal: eMax
-                      });
-                    })
-                )
-              )
-        )),
-        h(Card, null, h(CardContent, null,
-          h("div", { className: "aegis-section-title" }, "Threat Categories"),
-          Object.keys(catHits).length === 0
-            ? h("div", { className: "aegis-empty" }, "No threats detected yet")
-            : h("table", { className: "aegis-engine-table" },
-                h("thead", null, h("tr", null,
-                  h("th", null, "Category"),
-                  h("th", null, "Count"),
-                  h("th", null, "")
-                )),
-                h("tbody", null,
-                  Object.keys(catHits)
-                    .sort(function (a, b) { return catHits[b] - catHits[a]; })
-                    .map(function (name) {
-                      return h(EngineRow, {
-                        key: name, name: name,
-                        count: catHits[name], maxVal: cMax
-                      });
-                    })
-                )
-              )
-        ))
-      ),
-
+      /* ── Recent alerts ──────────────────────────────────────────────── */
       h(Card, null,
-        h(CardHeader, null, h(CardTitle, { style: { margin: 0, fontSize: "1rem" } },
-          "Recent Alerts ",
-          h("span", { className: "aegis-alert-count" },
-            "(" + (alerts.length || 0) + ")"
-          )
-        )),
-        h(CardContent, null,
-          alerts.length === 0
-            ? h("div", { className: "aegis-empty" }, "No alerts \u2014 all clear.")
-            : h("div", { className: "aegis-alerts" },
-                alerts.slice(0, 30).map(function (a, i) {
-                  return h(AlertItem, {
-                    key: a.timestamp || i, alert: a
-                  });
-                })
-              )
+        h(CardHeader, null,
+          h(CardTitle, { className: "text-base" }, "Recent Alerts (" + alerts.length + ")")
+        ),
+        h(CardContent, { className: "flex flex-col gap-2" },
+          alerts.length
+            ? alerts.map(function (a, i) { return h(AlertItem, { key: i, alert: a }); })
+            : h("span", { className: "text-xs text-muted-foreground" }, "No threats detected yet.")
         )
       )
-
     );
   }
 
-  /* ── Register tab ────────────────────────────────────────────────── */
-  if (REG && typeof REG.register === "function") {
-    REG.register("aegis-latent", AegisThreatLab);
-  } else {
-    setTimeout(boot, 50);
-  }
+  /* ── Register with Hermes Dashboard ─────────────────────────────────── */
+  window.__HERMES_PLUGINS__.register("aegis-latent", AegisThreatLab);
 })();

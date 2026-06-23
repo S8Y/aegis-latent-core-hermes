@@ -31,7 +31,7 @@ if str(_PLUGIN_DIR) not in sys.path:
 from engine.detectors import scan_text, sanity_check
 
 # ── Plugin metadata ─────────────────────────────────────────────────
-PLUGIN_VERSION = "2.4.0"
+PLUGIN_VERSION = "2.5.0"
 PLUGIN_DIR = _PLUGIN_DIR
 DATA_DIR = PLUGIN_DIR / "dashboard" / "data"
 
@@ -40,6 +40,7 @@ MAX_ALERTS = 500
 _PERSIST_INTERVAL = 5.0  # seconds between flushing to disk
 _lock = threading.RLock()  # reentrant — safe when _persist_store is called from _update_store
 _last_persist = 0.0  # first persist always flushes
+_toggle_port: int = 0  # set by _start_toggle_server
 
 _store: dict[str, Any] = {
     "scans_total": 0,
@@ -53,6 +54,10 @@ _store: dict[str, Any] = {
     "total_duration_ms": 0.0,
     "last_scan_at": None,
     "version": PLUGIN_VERSION,
+    "config": {
+        "blocking_enabled": os.environ.get("AEGIS_BLOCKING_ENABLED", "").lower() in ("1", "true", "yes"),
+        "toggle_port": 0,
+    },
 }
 
 
@@ -98,7 +103,8 @@ def _update_store(result: dict[str, Any]) -> None:
                 "timestamp": _store["last_scan_at"],
                 "severity": max_sev,
                 "verdict": verdict,
-                "text_snippet": result.get("text_snippet", "")[:120],
+                "tool": result.get("tool", ""),
+                "text_snippet": result.get("text_snippet", "")[:500],
                 "flagged_engines": [
                     r.get("engine")
                     for r in result.get("results", [])
@@ -159,13 +165,20 @@ def _merge_store(persisted: dict[str, Any]) -> None:
         for d in ("engine_hit_counts", "category_counts", "severity_counts"):
             for k, v in persisted.get(d, {}).items():
                 _store[d][k] = max(_store[d].get(k, 0), v)
+        # Preserve config from disk (user may have toggled blocking via CLI)
+        if persisted.get("config"):
+            _store["config"].update(persisted["config"])
 
 
 # ── Hook callbacks ──────────────────────────────────────────────────────────────
 
 
-def on_pre_tool_call(tool_name: str, args: dict[str, Any], **kwargs: Any) -> None:
-    """Hook fired before every tool call — scans ALL input for threats."""
+def on_pre_tool_call(tool_name: str, args: dict[str, Any], **kwargs: Any) -> str | None:
+    """Hook fired before every tool call — scans ALL input for threats.
+
+    Returns a block message string when blocking is enabled AND a threat
+    is detected.  Returns ``None`` to allow the tool call to proceed.
+    """
     # Diagnostic — visible in `hermes logs | grep '\[aegis\]'
     sys.stderr.write(f"[aegis] pre_tool_call(tool={tool_name})\n")
     # Flatten all args into a single text block for scanning
@@ -181,21 +194,48 @@ def on_pre_tool_call(tool_name: str, args: dict[str, Any], **kwargs: Any) -> Non
 
     text = "\n".join(texts) if texts else ""
 
+    # Read blocking config BEFORE scan — controls whether verdict can be "block"
+    with _lock:
+        blocking = _store.get("config", {}).get("blocking_enabled", False)
+
     # Record the event regardless — even empty scans count
-    result = scan_text(text).to_dict() if text else {
-        "is_threat": False, "severity": "clean",
-        "categories": [], "hit_engines": [],
-        "duration_ms": 0.0, "matched_pattern": None,
-        "matched_description": None,
-    }
+    if text:
+        result = scan_text(text, enable_blocking=blocking).to_dict()
+    else:
+        result = {
+            "is_threat": False, "severity": "clean",
+            "categories": [], "hit_engines": [],
+            "duration_ms": 0.0, "matched_pattern": None,
+            "matched_description": None,
+        }
     result["tool"] = tool_name
     _update_store(result)
+
+    # Block check — only blocks when blocking is ON and verdict is "block"
+    if blocking and result.get("overall_verdict") == "block":
+        reasons = []
+        for r in result.get("results", []):
+            if r.get("flagged"):
+                reasons.append(f"{r['engine']}: {r.get('reason', 'flagged')[:60]}")
+        msg = (
+            f"[AEGIS BLOCKED] Threat detected in {tool_name} call.\n"
+            + "\n".join(reasons[:5])
+        )
+        sys.stderr.write(f"[aegis] BLOCKED {tool_name}: {reasons[0] if reasons else 'threat'}\n")
+        return msg
+
+    return None
 
 
 def on_post_tool_call(
     tool_name: str, args: dict[str, Any], result: Any, **kwargs: Any
 ) -> None:
-    """Hook fired after every tool call — scans ALL output for threats."""
+    """Hook fired after every tool call — scans output for data-leak threats only.
+
+    Intentionally skips input-oriented detectors (jailbreak, adversarial-suffix,
+    exfiltration, WAF) because tool outputs are data, not instructions — those
+    engines produce false positives on file contents, web pages, and search results.
+    """
     texts: list[str] = []
     if isinstance(result, str) and len(result) > 3:
         texts.append(result)
@@ -205,12 +245,28 @@ def on_post_tool_call(
                 texts.append(val)
 
     text = "\n".join(texts) if texts else ""
-    result_payload = scan_text(text).to_dict() if text else {
-        "is_threat": False, "severity": "clean",
-        "categories": [], "hit_engines": [],
-        "duration_ms": 0.0, "matched_pattern": None,
-        "matched_description": None,
-    }
+    if text:
+        # Only run output-relevant engines: secrets, classification, malware,
+        # homoglyph obfuscation, base64 payloads, and entropy leaks.
+        result_payload = scan_text(
+            text,
+            skip_engines={
+                "critical_waf",
+                "high_confidence_waf",
+                "direct_jailbreak",
+                "context_escape",
+                "adversarial_suffix",
+                "exfiltration",
+                "manyshot_detect",
+            },
+        ).to_dict()
+    else:
+        result_payload = {
+            "is_threat": False, "severity": "clean",
+            "categories": [], "hit_engines": [],
+            "duration_ms": 0.0, "matched_pattern": None,
+            "matched_description": None,
+        }
     result_payload["tool"] = tool_name
     _update_store(result_payload)
 
@@ -281,6 +337,56 @@ def _cmd_sanity(**kwargs: Any) -> str:
     return json.dumps(results, indent=2)
 
 
+def _cmd_block(state: str = "", **kwargs: Any) -> str:
+    """Toggle blocking mode: ``hermes aegis block [on|off|status]``.
+
+    When blocking is ON, detected threats PREVENT the tool call from
+    executing (returns an AEGIS BLOCKED message instead).
+    When blocking is OFF, threats are logged and displayed but the
+    tool call proceeds normally.
+    """
+    del kwargs
+    with _lock:
+        config = _store.get("config", {})
+        current = config.get("blocking_enabled", False)
+
+    if state == "on":
+        new_val = True
+    elif state == "off":
+        new_val = False
+    elif state == "status":
+        return json.dumps({"blocking_enabled": current, "toggle_port": _toggle_port}, indent=2)
+    elif not state:
+        # No arg: toggle
+        new_val = not current
+    else:
+        return json.dumps({"error": f"unknown state '{state}', use on/off/status"}, indent=2)
+
+    _set_config_in_store("blocking_enabled", new_val)
+    _persist_store()
+    sys.stderr.write(f"[aegis] blocking {'ENABLED' if new_val else 'DISABLED'}\n")
+    return json.dumps({"blocking_enabled": new_val}, indent=2)
+
+
+# ── Store helpers for toggle server ────────────────────────────────────────────
+
+
+def _store_getter() -> dict[str, Any]:
+    """Return current store dict (used by toggle server)."""
+    with _lock:
+        return dict(_store)
+
+
+def _set_config_in_store(key: str, val: Any) -> None:
+    """Thread-safe config update (used by toggle server and CLI)."""
+    with _lock:
+        if "config" not in _store:
+            _store["config"] = {}
+        _store["config"][key] = val
+    # Also update in stats.json so dashboard reflects it immediately
+    _persist_store()
+
+
 # ── Tool handler (on-demand scan from agent) ────────────────────────────────────
 
 
@@ -306,6 +412,21 @@ def register(ctx: Any) -> None:
 
     Registers hooks, tools, and CLI commands.
     """
+    global _toggle_port
+
+    # ── Start toggle HTTP server (dashboard communication) ─────────────
+    try:
+        from engine._toggle_server import start as _start_toggle_server
+        _toggle_port = _start_toggle_server(
+            store_getter=_store_getter,
+            store_setter=_set_config_in_store,
+        )
+        with _lock:
+            _store["config"]["toggle_port"] = _toggle_port
+        sys.stderr.write(f"[aegis] toggle server on 127.0.0.1:{_toggle_port}\n")
+    except Exception as exc:
+        sys.stderr.write(f"[aegis] WARNING: toggle server failed: {exc}\n")
+
     # ── Hooks: intercept tool calls for threat detection ──────────────
     ctx.register_hook("pre_tool_call", on_pre_tool_call)
     ctx.register_hook("post_tool_call", on_post_tool_call)
@@ -360,6 +481,12 @@ def register(ctx: Any) -> None:
         help="Run detection-engine self-test (verifies all patterns)",
         setup_fn=lambda: None,
         handler_fn=_cmd_sanity,
+    )
+    ctx.register_cli_command(
+        name="block",
+        help="Toggle blocking mode: on|off|status (default: toggle)",
+        setup_fn=lambda: None,
+        handler_fn=_cmd_block,
     )
 
     # ── Try once at startup to persist (proves DATA_DIR is writable) ──

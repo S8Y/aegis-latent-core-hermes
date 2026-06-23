@@ -3,7 +3,7 @@
   "label": "Aegis",
   "description": "AI governance threat dashboard — real-time detection of prompt injection, jailbreaks, malware, credential leaks, and adversarial patterns.",
   "icon": "Shield",
-  "version": "2.4.0",
+  "version": "2.5.0",
   "tab": {
     "path": "/aegis",
     "position": "after:skills"

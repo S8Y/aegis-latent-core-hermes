@@ -6,4 +6,4 @@ Hermes Agent hooks and dashboard.  No external API keys, no proxy, no Vault.
 All scanning is pure-Python pattern matching.
 """
 
-__version__ = "2.4.0"
+__version__ = "2.5.0"

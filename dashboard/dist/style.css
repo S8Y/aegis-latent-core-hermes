@@ -170,14 +170,13 @@
   display: flex;
   gap: 0.75rem;
   align-items: center;
-  margin-bottom: 0.2rem;
+  flex-wrap: wrap;
 }
 
 .aegis-alert-severity {
   font-weight: 600;
   font-size: 0.7rem;
   text-transform: uppercase;
-  letter-spacing: 0.04em;
 }
 
 .aegis-alert-severity-critical { color: var(--color-destructive, #ef4444); }
@@ -187,9 +186,18 @@
   color: var(--color-muted-foreground);
   font-family: var(--font-mono, ui-monospace, monospace);
   font-size: 0.75rem;
+  line-height: 1.4;
   word-break: break-all;
+  margin-top: 0.25rem;
 }
 
+.aegis-alert-tool {
+  font-size: 0.7rem;
+  color: var(--color-muted-foreground, #888);
+  font-family: var(--font-mono, ui-monospace, monospace);
+  margin-left: auto;
+  opacity: 0.7;
+}
 .aegis-alert-engines {
   display: flex;
   gap: 0.25rem;
@@ -333,3 +341,85 @@
 .aegis-badge-clean { background: rgba(34, 197, 94, 0.15); color: var(--color-success, #22c55e); }
 .aegis-badge-flag { background: rgba(245, 158, 11, 0.15); color: var(--color-warning, #f59e0b); }
 .aegis-badge-block { background: rgba(239, 68, 68, 0.15); color: var(--color-destructive, #ef4444); }
+
+/* ── Blocking toggle control ───────────────────────────────────────── */
+
+.aegis-blocking-control {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.aegis-blocking-label {
+  font-size: 0.65rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted-foreground);
+  display: none;  /* hidden — status text says it */
+}
+
+.aegis-blocking-toggle {
+  position: relative;
+  display: inline-block;
+  width: 36px;
+  height: 20px;
+  padding: 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+.aegis-blocking-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.aegis-blocking-track {
+  position: absolute;
+  inset: 0;
+  border-radius: 10px;
+  background: var(--color-muted, rgba(128, 128, 128, 0.25));
+  transition: background 0.2s ease;
+}
+
+.aegis-blocking-toggle[title*="ON"] .aegis-blocking-track {
+  background: var(--color-destructive, #ef4444);
+}
+
+.aegis-blocking-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--color-card-foreground, #fff);
+  box-shadow: 0 1px 2px rgba(0,0,0,0.2);
+  transition: transform 0.2s ease;
+  z-index: 1;
+}
+
+.aegis-blocking-toggle[title*="ON"] .aegis-blocking-thumb {
+  transform: translateX(16px);
+}
+
+.aegis-blocking-toggle.aegis-blocking-error .aegis-blocking-track {
+  background: var(--color-warning, #f59e0b);
+}
+
+.aegis-blocking-status {
+  font-size: 0.7rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.aegis-blocking-errmsg {
+  font-size: 0.65rem;
+  color: var(--color-warning, #f59e0b);
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

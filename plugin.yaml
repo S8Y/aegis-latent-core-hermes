@@ -1,5 +1,5 @@
 name: aegis-latent
-version: "2.4.0"
+version: "2.5.0"
 description: >-
   AI governance & threat detection plugin — scans prompts and responses for
   jailbreaks, prompt injection, malware, credential leaks, and adversarial
