@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from .rules import (
+from engine.rules import (
     ADVERSARIAL_SUFFIX,
     CONTEXT_ESCAPE,
     CRITICAL_WAF,
