@@ -1,0 +1,9 @@
+name: aegis-latent
+version: "2.4.0"
+description: >-
+  AI governance & threat detection plugin — scans prompts and responses for
+  jailbreaks, prompt injection, malware, credential leaks, and adversarial
+  patterns.  Dashboard tab included.  Zero setup required.
+author: Juan Luna / Hermes plugin port
+tags: [security, governance, prompt-injection, waf, audit]
+requires_env: []
