@@ -6,22 +6,9 @@ adversarial patterns — then visualises everything in a Threat Lab dashboard ta
 
 **Zero configuration.** No API keys, no environment variables, no proxy setup.
 Plug and play.
-
----
-
-## Quick start
-
-```bash
-# 1. Clone into the Hermes plugins directory
-git clone https://github.com/juanlunaia/aegis-latent-core \
-  ~/.hermes/plugins/aegis-latent
-
-# 2. (Re)start Hermes — the plugin loads automatically
-hermes daemon restart
-
-# 3. Open the dashboard and find the "Aegis" tab
-```
-
+ 
+<img width="2539" height="917" alt="{26B69DCD-278D-4D2D-8768-66E18CDBC771}" src="https://github.com/user-attachments/assets/1231ac3a-a34a-4c49-9265-94a387b03fd2" />
+ 
 ---
 
 ## What it does
