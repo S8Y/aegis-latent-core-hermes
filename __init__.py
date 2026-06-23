@@ -23,22 +23,24 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-# Ensure plugin root is on sys.path so absolute imports of engine/ work
+# Ensure plugin directory is on sys.path for absolute engine imports
 _PLUGIN_DIR = Path(__file__).resolve().parent
 if str(_PLUGIN_DIR) not in sys.path:
     sys.path.insert(0, str(_PLUGIN_DIR))
 
 from engine.detectors import scan_text, sanity_check
 
-# ── Plugin metadata ─────────────────────────────────────────────────────────────
-
+# ── Plugin metadata ─────────────────────────────────────────────────
 PLUGIN_VERSION = "2.4.0"
 PLUGIN_DIR = _PLUGIN_DIR
 DATA_DIR = PLUGIN_DIR / "dashboard" / "data"
 
-# ── In-memory threat store ──────────────────────────────────────────────────────
+# ── In-memory threat store ──────────────────────────────────────────
+MAX_ALERTS = 500
+_PERSIST_INTERVAL = 5.0  # seconds between flushing to disk
+_lock = threading.RLock()  # reentrant — safe when _persist_store is called from _update_store
+_last_persist = 0.0  # first persist always flushes
 
-_lock = threading.Lock()
 _store: dict[str, Any] = {
     "scans_total": 0,
     "scans_clean": 0,
@@ -52,10 +54,6 @@ _store: dict[str, Any] = {
     "last_scan_at": None,
     "version": PLUGIN_VERSION,
 }
-
-MAX_ALERTS = 500
-_PERSIST_INTERVAL = 5.0  # seconds between flushing to disk
-_last_persist = time.monotonic()
 
 
 def _update_store(result: dict[str, Any]) -> None:
@@ -167,51 +165,53 @@ def _merge_store(persisted: dict[str, Any]) -> None:
 
 
 def on_pre_tool_call(tool_name: str, params: dict[str, Any], **kwargs: Any) -> None:
-    """Hook fired before every tool call — scans user input for threats.
-
-    This intercepts every tool invocation and runs the Aegis detection engines
-    on the input parameters.  Results are logged and stored for the dashboard.
-    """
-    # Extract text content from tool parameters
-    text = ""
+    """Hook fired before every tool call — scans ALL input for threats."""
+    sys.stderr.write(f"[aegis] pre_tool_call(tool={tool_name})\n")
+    # Flatten all params into a single text block for scanning
+    texts: list[str] = []
     if isinstance(params, dict):
         for val in params.values():
-            if isinstance(val, str) and len(val) > 10:
-                text = val
-                break
+            if isinstance(val, str) and len(val) > 3:
+                texts.append(val)
             elif isinstance(val, dict):
                 for v2 in val.values():
-                    if isinstance(v2, str) and len(v2) > 10:
-                        text = v2
-                        break
-                if text:
-                    break
+                    if isinstance(v2, str) and len(v2) > 3:
+                        texts.append(v2)
 
-    if not text:
-        return
+    text = "\n".join(texts) if texts else ""
 
-    result = scan_text(text).to_dict()
+    # Record the event regardless — even empty scans count
+    result = scan_text(text).to_dict() if text else {
+        "is_threat": False, "severity": "clean",
+        "categories": [], "hit_engines": [],
+        "duration_ms": 0.0, "matched_pattern": None,
+        "matched_description": None,
+    }
+    result["tool"] = tool_name
     _update_store(result)
 
 
 def on_post_tool_call(
     tool_name: str, params: dict[str, Any], result: Any, **kwargs: Any
 ) -> None:
-    """Hook fired after every tool call — scans LLM responses for unsafe output."""
-    text = ""
-    if isinstance(result, str):
-        text = result
+    """Hook fired after every tool call — scans ALL output for threats."""
+    texts: list[str] = []
+    if isinstance(result, str) and len(result) > 3:
+        texts.append(result)
     elif isinstance(result, dict):
         for val in result.values():
-            if isinstance(val, str) and len(val) > 10:
-                text = val
-                break
+            if isinstance(val, str) and len(val) > 3:
+                texts.append(val)
 
-    if not text:
-        return
-
-    scan_result = scan_text(text).to_dict()
-    _update_store(scan_result)
+    text = "\n".join(texts) if texts else ""
+    result_payload = scan_text(text).to_dict() if text else {
+        "is_threat": False, "severity": "clean",
+        "categories": [], "hit_engines": [],
+        "duration_ms": 0.0, "matched_pattern": None,
+        "matched_description": None,
+    }
+    result_payload["tool"] = tool_name
+    _update_store(result_payload)
 
 
 # ── CLI command handlers ─────────────────────────────────────────────────────────
